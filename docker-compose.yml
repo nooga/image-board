@@ -1,0 +1,56 @@
+version: "3.8"
+
+services:
+  # MongoDB for persistence
+  mongo:
+    image: mongo:7
+    container_name: imageboard-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: imageboard
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/imageboard --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for pub/sub
+  redis:
+    image: redis:7-alpine
+    container_name: imageboard-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO for S3-compatible storage
+  minio:
+    image: minio/minio
+    container_name: imageboard-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mongo_data:
+  redis_data:
+  minio_data:
