@@ -1,0 +1,32 @@
+name: Deploy to Monk Cluster
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-images:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: monk-io/monk-actions/build-images@v1
+      with:
+        registry-address: ${{ secrets.REGISTRY_ADDRESS }}
+        registry-username: ${{ secrets.REGISTRY_USERNAME }}
+        registry-password: ${{ secrets.REGISTRY_PASSWORD }}
+        registry-tls-verify: ${{ secrets.REGISTRY_TLS_VERIFY }}
+
+  deploy:
+    needs: build-images
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: monk-io/monk-actions/deploy@v1
+      with:
+        monkcode: ${{ secrets.MONKCODE }}
+        service-token: ${{ secrets.MONK_SERVICE_TOKEN }}
+        workload: "image-board/prod"
+        branch-tag: "default"
+        capsule-mode: static

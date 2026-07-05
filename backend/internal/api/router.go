@@ -37,6 +37,7 @@ func NewRouter(repo repository.Repository, store storage.Storage, hub *websocket
 		r.Post("/topics", handlers.CreateTopic)
 		r.Get("/topics/{id}", handlers.GetTopic)
 		r.Post("/topics/{id}/messages", handlers.CreateMessage)
+		r.Get("/images/*", handlers.ServeImage)
 	})
 
 	// WebSocket routes

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -40,6 +41,12 @@ func (h *Handlers) ListTopics(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "Failed to fetch topics", http.StatusInternalServerError)
 		return
+	}
+
+	// Derive the public image URL from the stored key so responses always
+	// point at the backend proxy, even for records written before that fix.
+	for i := range topics {
+		topics[i].ImageURL = h.storage.GetURL(topics[i].ImageKey)
 	}
 
 	writeJSON(w, http.StatusOK, topics)
@@ -119,6 +126,8 @@ func (h *Handlers) GetTopic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	topic.ImageURL = h.storage.GetURL(topic.ImageKey)
+
 	messages, err := h.repo.GetMessagesByTopic(r.Context(), id, 100, 0)
 	if err != nil {
 		http.Error(w, "Failed to fetch messages", http.StatusInternalServerError)
@@ -181,6 +190,27 @@ func (h *Handlers) CreateMessage(w http.ResponseWriter, r *http.Request) {
 	h.hub.BroadcastNewMessage(idStr, message)
 
 	writeJSON(w, http.StatusCreated, message)
+}
+
+// ServeImage streams an image out of MinIO through the backend. MinIO is
+// private to the cluster, so the browser fetches images from here (proxied by
+// nginx at /api/) instead of from an unreachable MinIO endpoint.
+func (h *Handlers) ServeImage(w http.ResponseWriter, r *http.Request) {
+	key := "images/" + chi.URLParam(r, "*")
+
+	reader, contentType, err := h.storage.Get(r.Context(), key)
+	if err != nil {
+		http.Error(w, "Image not found", http.StatusNotFound)
+		return
+	}
+	defer reader.Close()
+
+	if contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+
+	io.Copy(w, reader)
 }
 
 func (h *Handlers) HandleFeedWS(w http.ResponseWriter, r *http.Request) {

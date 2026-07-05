@@ -1,0 +1,26 @@
+.git
+.gitignore
+
+# Go build output / temp
+bin
+dist
+build
+tmp
+*.log
+
+# Editor/OS metadata
+.DS_Store
+.idea
+.vscode
+
+# Env files (often contain secrets)
+.env
+.env.*
+
+# Frontend/Node artifacts (if any end up here)
+node_modules
+
+# Python artifacts (just in case)
+__pycache__
+*.pyc
+.venv

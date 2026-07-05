@@ -1,0 +1,6 @@
+REPO image-board
+LOAD monk/prod.yaml
+ENTRY image-board/prod
+IMAGE image-board-backend:latest image-board/backend backend Dockerfile
+IMAGE image-board-frontend:latest image-board/frontend frontend Dockerfile
+SECRET mongo-password minio-access-key minio-secret-key

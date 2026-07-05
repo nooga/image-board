@@ -13,6 +13,7 @@ import (
 
 type Storage interface {
 	Upload(ctx context.Context, reader io.Reader, size int64, contentType string) (key string, url string, err error)
+	Get(ctx context.Context, key string) (reader io.ReadCloser, contentType string, err error)
 	GetURL(key string) string
 }
 
@@ -89,11 +90,28 @@ func (s *S3Storage) Upload(ctx context.Context, reader io.Reader, size int64, co
 	return key, url, nil
 }
 
-func (s *S3Storage) GetURL(key string) string {
-	protocol := "http"
-	if s.useSSL {
-		protocol = "https"
+// Get streams an object from storage. MinIO is private to the cluster, so
+// clients never talk to it directly; the backend proxies image bytes instead.
+func (s *S3Storage) Get(ctx context.Context, key string) (io.ReadCloser, string, error) {
+	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, "", err
 	}
-	return fmt.Sprintf("%s://%s/%s/%s", protocol, s.endpoint, s.bucket, key)
+
+	// GetObject is lazy; Stat forces the fetch so missing keys surface as errors.
+	info, err := obj.Stat()
+	if err != nil {
+		obj.Close()
+		return nil, "", err
+	}
+
+	return obj, info.ContentType, nil
+}
+
+// GetURL returns a relative URL served by the backend itself (proxied publicly
+// by nginx at /api/), rather than a direct MinIO endpoint that is only
+// reachable inside the cluster.
+func (s *S3Storage) GetURL(key string) string {
+	return "/api/" + key
 }
 

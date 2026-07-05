@@ -1,0 +1,183 @@
+namespace: image-board
+
+mongo:
+  defines: runnable
+  inherits: mongodb/mongodb
+  metadata:
+    private: true
+  permitted-secrets:
+    mongo-password: true
+  variables:
+    mongo-init-database:
+      type: string
+      value: imageboard
+    mongo-init-password:
+      type: string
+      value: <- secret("mongo-password")
+
+redis:
+  defines: runnable
+  inherits: redis/redis
+  metadata:
+    private: true
+  services:
+    redis-svc:
+      container: redis
+      port: 6379
+      protocol: tcp
+
+minio:
+  defines: runnable
+  inherits: minio/base
+  metadata:
+    private: true
+  permitted-secrets:
+    minio-access-key: true
+    minio-secret-key: true
+  checks:
+    readiness:
+      code: |
+        http-get-service("image-board/minio", "api", "/minio/health/ready") get-member("status") 200 eq?
+      period: 5
+      initialDelay: 5
+      attempts: 24
+  variables:
+    minio-root-user:
+      type: string
+      env: MINIO_ROOT_USER
+      value: <- secret("minio-access-key")
+    minio-root-password:
+      type: string
+      env: MINIO_ROOT_PASSWORD
+      value: <- secret("minio-secret-key")
+
+backend:
+  defines: runnable
+  metadata:
+    name: Image Board API
+    description: Go API and WebSocket server for the real-time image board.
+  permitted-secrets:
+    mongo-password: true
+    minio-access-key: true
+    minio-secret-key: true
+  connections:
+    mongo:
+      target: image-board/mongo
+      service: mongodb
+    redis:
+      target: image-board/redis
+      service: redis-svc
+    minio:
+      target: image-board/minio
+      service: api
+  depends:
+    wait-for:
+      runnables:
+        - image-board/mongo
+        - image-board/redis
+        - image-board/minio
+      timeout: 120
+  containers:
+    api:
+      image: image-board-backend:latest
+  services:
+    api:
+      container: api
+      port: 8080
+      protocol: tcp
+  variables:
+    port:
+      env: PORT
+      type: string
+      value: "8080"
+    mongo-user:
+      type: string
+      value: mongo
+    mongo-uri:
+      env: MONGO_URI
+      type: string
+      value: >-
+        <- "mongodb://" $mongo-user ":" secret("mongo-password") url-encode "@"
+        connection-hostname("mongo") ":" connection-port("mongo")
+        "/imageboard?authSource=admin" concat-all
+    mongo-db:
+      env: MONGO_DB
+      type: string
+      value: imageboard
+    redis-addr:
+      env: REDIS_ADDR
+      type: string
+      value: >-
+        <- connection-hostname("redis") ":" connection-port("redis")
+        concat-all
+    minio-endpoint:
+      env: MINIO_ENDPOINT
+      type: string
+      value: >-
+        <- connection-hostname("minio") ":" connection-port("minio")
+        concat-all
+    minio-access-key:
+      env: MINIO_ACCESS_KEY
+      type: string
+      value: <- secret("minio-access-key")
+    minio-secret-key:
+      env: MINIO_SECRET_KEY
+      type: string
+      value: <- secret("minio-secret-key")
+    minio-bucket:
+      env: MINIO_BUCKET
+      type: string
+      value: imageboard
+    minio-use-ssl:
+      env: MINIO_USE_SSL
+      type: string
+      value: "false"
+
+frontend:
+  defines: runnable
+  metadata:
+    name: Image Board Frontend
+    description: React SPA served by nginx with API and WebSocket reverse proxy.
+  connections:
+    backend:
+      target: image-board/backend
+      service: api
+  depends:
+    wait-for:
+      runnables:
+        - image-board/backend
+      timeout: 120
+  containers:
+    web:
+      image: image-board-frontend:latest
+  services:
+    http:
+      container: web
+      port: 8080
+      protocol: tcp
+      ingress-routes:
+        web:
+          path-prefix: /
+  variables:
+    backend-url:
+      env: BACKEND_URL
+      type: string
+      value: >-
+        <- "http://" connection-hostname("backend") ":"
+        connection-port("backend") concat-all
+    nginx-port:
+      env: NGINX_PORT
+      type: string
+      value: "8080"
+
+prod:
+  defines: group
+  metadata:
+    name: Image Board
+    description: Real-time image board with Go backend, React frontend, MongoDB, Redis, and MinIO.
+  members:
+    - image-board/mongo
+    - image-board/redis
+    - image-board/minio
+    - image-board/backend
+    - image-board/frontend
