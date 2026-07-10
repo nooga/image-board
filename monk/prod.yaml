@@ -5,6 +5,14 @@ mongo:
   inherits: mongodb/mongodb
   metadata:
     private: true
+  containers:
+    mongodb:
+      cpuquota: 100000.0
+      memory: 1073741824
+      resources:
+        requests:
+          cpu: 500
+          memory: 512
   permitted-secrets:
     mongo-password: true
   variables:
@@ -20,6 +28,14 @@ redis:
   inherits: redis/redis
   metadata:
     private: true
+  containers:
+    redis:
+      cpuquota: 50000.0
+      memory: 268435456
+      resources:
+        requests:
+          cpu: 200
+          memory: 128
   services:
     redis-svc:
       container: redis
@@ -31,6 +47,14 @@ minio:
   inherits: minio/base
   metadata:
     private: true
+  containers:
+    minio:
+      cpuquota: 50000.0
+      memory: 536870912
+      resources:
+        requests:
+          cpu: 200
+          memory: 256
   permitted-secrets:
     minio-access-key: true
     minio-secret-key: true
@@ -56,6 +80,15 @@ backend:
   metadata:
     name: Image Board API
     description: Go API and WebSocket server for the real-time image board.
+  scale:
+    value: 2
+    min: 2
+    max: 5
+    interval: 30
+    throttle-up: 60
+    throttle-down: 180
+    metrics:
+      used-cpu-percent: 0.7
   permitted-secrets:
     mongo-password: true
     minio-access-key: true
@@ -76,7 +109,7 @@ backend:
         - image-board/mongo
         - image-board/redis
         - image-board/minio
-      timeout: 120
+      timeout: 300
   containers:
     api:
       image: image-board-backend:latest
@@ -146,7 +179,7 @@ frontend:
     wait-for:
       runnables:
         - image-board/backend
-      timeout: 120
+      timeout: 300
   containers:
     web:
       image: image-board-frontend:latest
