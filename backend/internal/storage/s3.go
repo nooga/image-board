@@ -24,6 +24,10 @@ type S3Storage struct {
 	useSSL   bool
 }
 
+// NewS3Storage creates an S3Storage. It no longer checks connectivity at
+// construction time — the first real operation (Upload/Get) will surface
+// connection errors. This lets the server start up cleanly even when MinIO
+// credentials haven't been injected yet.
 func NewS3Storage(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*S3Storage, error) {
 	client, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
@@ -31,40 +35,6 @@ func NewS3Storage(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*
 	})
 	if err != nil {
 		return nil, err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Create bucket if it doesn't exist
-	exists, err := client.BucketExists(ctx, bucket)
-	if err != nil {
-		return nil, err
-	}
-
-	if !exists {
-		err = client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{})
-		if err != nil {
-			return nil, err
-		}
-
-		// Set bucket policy to allow public read access
-		policy := fmt.Sprintf(`{
-			"Version": "2012-10-17",
-			"Statement": [
-				{
-					"Effect": "Allow",
-					"Principal": {"AWS": ["*"]},
-					"Action": ["s3:GetObject"],
-					"Resource": ["arn:aws:s3:::%s/*"]
-				}
-			]
-		}`, bucket)
-
-		err = client.SetBucketPolicy(ctx, bucket, policy)
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	return &S3Storage{
@@ -75,8 +45,46 @@ func NewS3Storage(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*
 	}, nil
 }
 
+// ensureBucket lazily creates / verifies the bucket on first use.
+func (s *S3Storage) ensureBucket(ctx context.Context) error {
+	tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	exists, err := s.client.BucketExists(tctx, s.bucket)
+	if err != nil {
+		return err
+	}
+
+	if !exists {
+		if err := s.client.MakeBucket(tctx, s.bucket, minio.MakeBucketOptions{}); err != nil {
+			return err
+		}
+
+		policy := fmt.Sprintf(`{
+			"Version": "2012-10-17",
+			"Statement": [
+				{
+					"Effect": "Allow",
+					"Principal": {"AWS": ["*"]},
+					"Action": ["s3:GetObject"],
+					"Resource": ["arn:aws:s3:::%s/*"]
+				}
+			]
+		}`, s.bucket)
+
+		if err := s.client.SetBucketPolicy(tctx, s.bucket, policy); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (s *S3Storage) Upload(ctx context.Context, reader io.Reader, size int64, contentType string) (string, string, error) {
-	// Generate unique key
+	if err := s.ensureBucket(ctx); err != nil {
+		return "", "", fmt.Errorf("storage unavailable: %w", err)
+	}
+
 	key := fmt.Sprintf("images/%s", uuid.New().String())
 
 	_, err := s.client.PutObject(ctx, s.bucket, key, reader, size, minio.PutObjectOptions{
@@ -90,15 +98,13 @@ func (s *S3Storage) Upload(ctx context.Context, reader io.Reader, size int64, co
 	return key, url, nil
 }
 
-// Get streams an object from storage. MinIO is private to the cluster, so
-// clients never talk to it directly; the backend proxies image bytes instead.
+// Get streams an object from storage.
 func (s *S3Storage) Get(ctx context.Context, key string) (io.ReadCloser, string, error) {
 	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
 		return nil, "", err
 	}
 
-	// GetObject is lazy; Stat forces the fetch so missing keys surface as errors.
 	info, err := obj.Stat()
 	if err != nil {
 		obj.Close()
@@ -108,10 +114,7 @@ func (s *S3Storage) Get(ctx context.Context, key string) (io.ReadCloser, string,
 	return obj, info.ContentType, nil
 }
 
-// GetURL returns a relative URL served by the backend itself (proxied publicly
-// by nginx at /api/), rather than a direct MinIO endpoint that is only
-// reachable inside the cluster.
+// GetURL returns a relative URL served by the backend itself.
 func (s *S3Storage) GetURL(key string) string {
 	return "/api/" + key
 }
-

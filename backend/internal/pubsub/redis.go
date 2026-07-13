@@ -3,6 +3,7 @@ package pubsub
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -24,9 +25,22 @@ type RedisPubSub struct {
 }
 
 func NewRedisPubSub(addr string) (*RedisPubSub, error) {
-	client := redis.NewClient(&redis.Options{
-		Addr: addr,
-	})
+	var opts *redis.Options
+	var err error
+
+	// Support both "host:port" and full Redis URL formats (redis://... or rediss://...)
+	if strings.HasPrefix(addr, "redis://") || strings.HasPrefix(addr, "rediss://") {
+		opts, err = redis.ParseURL(addr)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		opts = &redis.Options{
+			Addr: addr,
+		}
+	}
+
+	client := redis.NewClient(opts)
 
 	ctx := context.Background()
 	if err := client.Ping(ctx).Err(); err != nil {
@@ -74,4 +88,3 @@ func (r *RedisPubSub) Subscribe(ctx context.Context, channel string) (<-chan []b
 func (r *RedisPubSub) TopicChannel(topicID string) string {
 	return ChannelPrefix + topicID
 }
-

@@ -34,10 +34,13 @@ func main() {
 	}
 	defer ps.Close()
 
-	// Initialize S3/MinIO storage
+	// Initialize S3/MinIO storage. Connection is lazy — the client is created
+	// here but no network call is made until the first upload or download.
+	// If MINIO_ENDPOINT is not set the default "localhost:9000" is used and
+	// image operations will return errors at runtime (not at startup).
 	store, err := storage.NewS3Storage(cfg.MinioEndpoint, cfg.MinioAccessKey, cfg.MinioSecretKey, cfg.MinioBucket, cfg.MinioUseSSL)
 	if err != nil {
-		log.Fatalf("Failed to connect to MinIO: %v", err)
+		log.Fatalf("Failed to initialize MinIO storage client: %v", err)
 	}
 
 	// Initialize WebSocket hub
@@ -80,4 +83,3 @@ func main() {
 
 	log.Println("Server stopped")
 }
-
