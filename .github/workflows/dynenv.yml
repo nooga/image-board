@@ -49,7 +49,7 @@ jobs:
   schedule-reconcile:
     if: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
-    environment: monk-capsules
+    environment: "monk-capsules"
     steps:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y curl jq
@@ -112,7 +112,7 @@ jobs:
 
   resolve-context:
     runs-on: ubuntu-latest
-    environment: monk-capsules
+    environment: "monk-capsules"
     outputs:
       should_run: ${{ steps.ctx.outputs.should_run }}
       action: ${{ steps.ctx.outputs.action }}
@@ -123,34 +123,63 @@ jobs:
     steps:
       - name: Resolve branch action
         id: ctx
+        # ENG-465: github.ref_name, github.event.pull_request.head.ref, and
+        # workflow_dispatch inputs are attacker-influenced (any fork PR names
+        # its own head branch) and git refs may legally contain shell
+        # metacharacters (quotes, command substitution, backticks). Threading
+        # them through env: instead of interpolating a GH expression inside
+        # the script body is the only safe pattern -- GitHub substitutes
+        # expressions as raw text into run: before bash parses it, so
+        # anything embedded there can break out of a quoted assignment
+        # regardless of quoting style.
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           MONK_CAPSULE_TOKEN: ${{ secrets.MONK_CAPSULE_TOKEN }}
+          CTX_EVENT_NAME: ${{ github.event_name }}
+          CTX_REF_NAME: ${{ github.ref_name }}
+          CTX_PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          CTX_DISPATCH_ACTION: ${{ github.event.inputs.action }}
+          CTX_DISPATCH_SOURCE: ${{ github.event.inputs.source }}
+          CTX_DISPATCH_BRANCH: ${{ github.event.inputs.branch }}
+          # Generation-time value, but still untrusted: clusterNamePrefix is a
+          # free-form monk.capsule.setup argument. It used to be interpolated
+          # straight into the echo below, where a quote broke out of the
+          # string exactly like an unescaped GH expression would.
+          CLUSTER_NAME_PREFIX: "image-board"
         run: |
-          EVENT="${{ github.event_name }}"
+          EVENT="$CTX_EVENT_NAME"
           ACTION=""
           BRANCH_NAME=""
           SOURCE=""
           case "$EVENT" in
             push)
-              BRANCH_NAME="${{ github.ref_name }}"
+              BRANCH_NAME="$CTX_REF_NAME"
               ACTION="provision_deploy"
               SOURCE="push"
               ;;
             pull_request)
-              BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+              BRANCH_NAME="$CTX_PR_HEAD_REF"
               ACTION="destroy"
               ;;
             workflow_dispatch)
-              ACTION="${{ github.event.inputs.action }}"
-              SOURCE="${{ github.event.inputs.source }}"
-              if [ -n "${{ github.event.inputs.branch }}" ]; then
-                BRANCH_NAME="${{ github.event.inputs.branch }}"
+              ACTION="$CTX_DISPATCH_ACTION"
+              SOURCE="$CTX_DISPATCH_SOURCE"
+              if [ -n "$CTX_DISPATCH_BRANCH" ]; then
+                BRANCH_NAME="$CTX_DISPATCH_BRANCH"
               else
-                BRANCH_NAME="${{ github.ref_name }}"
+                BRANCH_NAME="$CTX_REF_NAME"
               fi
               ;;
           esac
+          # $GITHUB_OUTPUT is line-oriented, so a newline in a resolved value
+          # would append attacker-chosen `key=value` lines to it. Git refs
+          # cannot contain one, but the workflow_dispatch `branch` input is a
+          # free-form string that can. CLUSTER_NAME_PREFIX is a generation-time
+          # value that the generator already rejects newlines in; stripped here
+          # too so the script defends itself independently of how it was made.
+          BRANCH_NAME="$(printf '%s' "$BRANCH_NAME" | tr -d '\n\r')"
+          ACTION="$(printf '%s' "$ACTION" | tr -d '\n\r')"
+          CLUSTER_NAME_PREFIX="$(printf '%s' "$CLUSTER_NAME_PREFIX" | tr -d '\n\r')"
           if [ -z "$ACTION" ] || [ -z "$BRANCH_NAME" ]; then
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -203,7 +232,7 @@ jobs:
           echo "action=$ACTION" >> "$GITHUB_OUTPUT"
           echo "branch_name=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
           echo "branch_tag=branch-${SAFE_BRANCH}" >> "$GITHUB_OUTPUT"
-          echo "cluster_name=image-board-${SAFE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "cluster_name=${CLUSTER_NAME_PREFIX}-${SAFE_BRANCH}" >> "$GITHUB_OUTPUT"
           ENV_NAME="${SAFE_BRANCH:0:63}"
           ENV_NAME="${ENV_NAME%-}"
           [ -z "$ENV_NAME" ] && ENV_NAME="default"
@@ -213,7 +242,7 @@ jobs:
     needs: resolve-context
     if: ${{ needs.resolve-context.outputs.should_run == 'true' && needs.resolve-context.outputs.action == 'provision_deploy' }}
     runs-on: ubuntu-latest
-    environment: monk-capsules
+    environment: "monk-capsules"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -243,20 +272,48 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
       - name: Create pull request for branch lifecycle
         if: ${{ success() && env.ACT != 'true' }}
+        # ENG-465: branch_name is the raw (unsanitized) resolve-context
+        # output, so it must reach the script via env:, not a GH expression
+        # substitution inside run:. The PR body is also now built with
+        # jq -n --arg instead of hand-rolled JSON string concatenation, since
+        # a literal quote in the branch name would otherwise break out of
+        # the JSON payload too.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          PR_BRANCH: ${{ needs.resolve-context.outputs.branch_name }}
+          PR_BASE_BRANCH: "main"
         run: |
-          BRANCH="${{ needs.resolve-context.outputs.branch_name }}"
-          BASE="main"
-          REPO="${{ github.repository }}"
+          BRANCH="$PR_BRANCH"
+          BASE="$PR_BASE_BRANCH"
+          REPO="$GITHUB_REPOSITORY"
           PR_TITLE="[capsule] $BRANCH"
           PR_BODY="Auto-created by Monk Capsules.\n\nClosing this PR will destroy the Capsule."
-          EXISTING=$(curl -s -H "Authorization: token ${{ github.token }}" \
-            "https://api.github.com/repos/$REPO/pulls?head=${{ github.repository_owner }}:$BRANCH&base=$BASE&state=open" \
+          # A branch name may legally contain '&' or '#', which would append a
+          # query parameter or truncate the rest of the URL as a fragment if the
+          # value were pasted into the query string. Not an injection into the
+          # shell (the expansion is quoted) but it makes this probe answer about
+          # a different query than the one intended. -G plus --data-urlencode
+          # percent-encodes each value -- curl encodes only the part after the
+          # first '=', so the parameter names survive.
+          EXISTING=$(curl -s -G "https://api.github.com/repos/$REPO/pulls" \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            --data-urlencode "head=$GITHUB_REPOSITORY_OWNER:$BRANCH" \
+            --data-urlencode "base=$BASE" \
+            --data-urlencode "state=open" \
             | jq length)
           if [ "$EXISTING" = "0" ]; then
+            PAYLOAD=$(jq -n \
+              --arg title "$PR_TITLE" \
+              --arg head "$BRANCH" \
+              --arg base "$BASE" \
+              --arg body "$PR_BODY" \
+              '{title:$title,head:$head,base:$base,body:$body}')
             RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.github.com/repos/$REPO/pulls" \
-              -H "Authorization: token ${{ github.token }}" \
+              -H "Authorization: token $GITHUB_TOKEN" \
               -H "Content-Type: application/json" \
-              -d "{\"title\":\"$PR_TITLE\",\"head\":\"$BRANCH\",\"base\":\"$BASE\",\"body\":\"$PR_BODY\"}")
+              -d "$PAYLOAD")
             HTTP_CODE=$(echo "$RESPONSE" | tail -1)
             BODY=$(echo "$RESPONSE" | sed '$ d')
             if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
@@ -273,7 +330,7 @@ jobs:
     needs: [resolve-context, provision]
     if: ${{ always() && needs.resolve-context.outputs.should_run == 'true' && needs.resolve-context.outputs.action != 'destroy' && needs.resolve-context.outputs.action != 'deprovision' && (needs.provision.result == 'success' || needs.provision.result == 'skipped') }}
     runs-on: ubuntu-latest
-    environment: monk-capsules
+    environment: "monk-capsules"
     outputs:
       monkcode: ${{ steps.meta.outputs.monkcode }}
       monk_jit_cli_token: ${{ steps.meta.outputs.monk_jit_cli_token }}
@@ -326,7 +383,7 @@ jobs:
           environment-name: ${{ needs.resolve-context.outputs.environment_name }}
           branch-tag: ${{ needs.resolve-context.outputs.branch_tag }}
           capsule-mode: cloud
-          peer-pool-tag: 'capsule-pool'
+          peer-pool-tag: "capsule-pool"
           health-check-path: /
       - name: Update capsule metadata (success)
         if: ${{ success() }}
@@ -334,11 +391,10 @@ jobs:
           MONK_CAPSULE_METADATA_JIT_TOKEN=$(echo "$MONK_CAPSULE_METADATA_JIT_TOKEN_B64" | base64 -di | base64 -di)
           echo "::add-mask::$MONK_CAPSULE_METADATA_JIT_TOKEN"
           NOW_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          PREVIEW_URL="${{ steps.deploy.outputs.preview-url }}"
           PAYLOAD=$(jq -n \
-            --arg branch "${{ needs.resolve-context.outputs.branch_name }}" \
-            --arg repository "${{ github.repository }}" \
-            --arg githubEnvironment "capsule-${{ needs.resolve-context.outputs.environment_name }}" \
+            --arg branch "$BRANCH_NAME" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg githubEnvironment "capsule-$ENVIRONMENT_NAME" \
             --arg status "active" \
             --arg previewUrl "$PREVIEW_URL" \
             --arg now "$NOW_UTC" \
@@ -368,6 +424,15 @@ jobs:
         env:
           MONK_CAPSULE_METADATA_JIT_TOKEN_B64: ${{ needs.fetch-metadata.outputs.capsule_metadata_jit_token }}
           ENVIRONMENT_NAME: ${{ needs.resolve-context.outputs.environment_name }}
+          # Output of an external action, so not independently constrained —
+          # threaded through env: like every other expression rather than
+          # substituted into the script body.
+          PREVIEW_URL: ${{ steps.deploy.outputs.preview-url }}
+          # ENG-465: branch_name is the raw (unsanitized) resolve-context
+          # output, so it goes through env: like everything else here rather
+          # than a GH expression substitution inside the script body.
+          BRANCH_NAME: ${{ needs.resolve-context.outputs.branch_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           # Sourced from fetch-metadata outputs (not the workflow-level env
           # block) because this job runs in a per-branch GH environment that
           # does not have the monk-capsules-scoped variables in scope.
@@ -382,9 +447,9 @@ jobs:
           echo "::add-mask::$MONK_CAPSULE_METADATA_JIT_TOKEN"
           NOW_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           PAYLOAD=$(jq -n \
-            --arg branch "${{ needs.resolve-context.outputs.branch_name }}" \
-            --arg repository "${{ github.repository }}" \
-            --arg githubEnvironment "capsule-${{ needs.resolve-context.outputs.environment_name }}" \
+            --arg branch "$BRANCH_NAME" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg githubEnvironment "capsule-$ENVIRONMENT_NAME" \
             --arg status "failed" \
             --arg now "$NOW_UTC" \
             '{
@@ -411,6 +476,8 @@ jobs:
         env:
           MONK_CAPSULE_METADATA_JIT_TOKEN_B64: ${{ needs.fetch-metadata.outputs.capsule_metadata_jit_token }}
           ENVIRONMENT_NAME: ${{ needs.resolve-context.outputs.environment_name }}
+          BRANCH_NAME: ${{ needs.resolve-context.outputs.branch_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           MONK_SUBSCRIPTION_API_BASE: ${{ needs.fetch-metadata.outputs.subscription_api_base }}
           MONK_ORG_SLUG: ${{ needs.fetch-metadata.outputs.org_slug }}
           MONK_API_PREFIX: ${{ needs.fetch-metadata.outputs.api_prefix }}
@@ -420,7 +487,7 @@ jobs:
     needs: resolve-context
     if: ${{ needs.resolve-context.outputs.should_run == 'true' && (needs.resolve-context.outputs.action == 'destroy' || needs.resolve-context.outputs.action == 'deprovision') }}
     runs-on: ubuntu-latest
-    environment: monk-capsules
+    environment: "monk-capsules"
     steps:
       - uses: actions/checkout@v4
         with:
