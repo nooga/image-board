@@ -1,6 +1,7 @@
 # Multi-stage build for Go backend
 # Builder stage
-FROM golang:1.21-alpine AS builder
+# Run build tools natively; cross-compile only the resulting server binary.
+FROM --platform=$BUILDPLATFORM golang:1.21-alpine AS builder
 
 WORKDIR /app
 

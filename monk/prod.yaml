@@ -80,6 +80,12 @@ backend:
   containers:
     api:
       image: image-board-backend:latest
+      resources:
+        requests:
+          cpu: 250
+          memory: 256
+      cpuquota: 1
+      memory: 536870912
   services:
     api:
       container: api

@@ -1,7 +1,8 @@
 # Multi-stage Dockerfile for React + TypeScript Vite SPA
 
 # 1) Build stage
-FROM node:24-alpine AS builder
+# Static assets are architecture-independent; run Node and esbuild natively.
+FROM --platform=$BUILDPLATFORM node:24-alpine AS builder
 
 # Some npm deps may require native compilation
 RUN apk add --no-cache python3 make g++
